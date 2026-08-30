@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Argument.ai — WebMCP Tool Tester</title>
+<style>
+  :root {
+    --bg: #F7F5EF; --surface: #FFFFFF; --ink: #2C2A24; --ink-muted: #8A8780;
+    --border: #DDD9D0; --pro: #1A3A6B; --con: #7A1A1A; --highlight: #E8B84B;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--ink);
+    display: grid; grid-template-columns: 360px 1fr; height: 100vh;
+  }
+  header {
+    grid-column: 1 / -1; padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); display: flex; align-items: baseline; gap: 10px;
+  }
+  header h1 { font-family: Georgia, serif; font-size: 17px; margin: 0; }
+  header span { font-size: 12px; color: var(--ink-muted); }
+  #panel {
+    grid-row: 2; border-right: 1px solid var(--border); background: var(--surface);
+    padding: 16px; overflow-y: auto;
+  }
+  #output {
+    grid-row: 2; padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  label { display: block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--ink-muted); margin: 12px 0 4px; }
+  select, input, textarea, button {
+    font-family: inherit; font-size: 13px; width: 100%; padding: 7px 9px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--ink);
+  }
+  textarea { min-height: 60px; resize: vertical; }
+  #run-btn {
+    margin-top: 16px; background: var(--ink); color: var(--bg); border: none;
+    font-weight: 600; cursor: pointer; padding: 10px;
+  }
+  #run-btn:hover { opacity: 0.9; }
+  #tool-desc { font-size: 12px; color: var(--ink-muted); margin-top: 6px; line-height: 1.4; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+  }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-muted); margin: 0 0 8px; }
+  pre {
+    margin: 0; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  }
+  .log-entry { border-bottom: 1px dashed var(--border); padding-bottom: 10px; margin-bottom: 10px; }
+  .log-entry:last-child { border-bottom: none; }
+  .log-tool { font-weight: 700; color: var(--pro); }
+  .log-error { color: var(--con); }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); margin-left: 6px; color: var(--ink-muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Argument.ai</h1>
+  <span>Standalone WebMCP tool tester — exercises the same 12 tools without an agent host or the full canvas UI.</span>
+</header>
+
+<div id="panel">
+  <label for="tool-select">Tool</label>
+  <select id="tool-select"></select>
+  <div id="tool-desc"></div>
+  <div id="tool-form"></div>
+  <button id="run-btn" onclick="runTool()">Run tool</button>
+</div>
+
+<div id="output">
+  <div class="card">
+    <h2>Current state</h2>
+    <pre id="state-view"></pre>
+  </div>
+  <div class="card">
+    <h2>Call log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var STORAGE_KEY = 'argumentai_state';
+
+  var state = {
+    topic: '', nodes: [], edges: [], history: [],
+    agentSide: null, userSide: null, selectedNodeId: null
+  };
+
+  function nanoid(n) {
+    n = n || 8;
+    var alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    var bytes = crypto.getRandomValues(new Uint8Array(n));
+    var out = '';
+    for (var i = 0; i < n; i++) out += alphabet[bytes[i] % alphabet.length];
+    return out;
+  }
+  function clampStrength(s) {
+    s = Number(s);
+    if (isNaN(s)) s = 3;
+    return Math.max(1, Math.min(5, Math.round(s)));
+  }
+  function findNode(id) {
+    for (var i = 0; i < state.nodes.length; i++) if (state.nodes[i].id === id) return state.nodes[i];
+    return null;
+  }
+  function createNode(type, text, author, side, strength) {
+    var angle = (state.nodes.length * 137.5) * Math.PI / 180;
+    var radius = 120 + state.nodes.length * 15;
+    var node = {
+      id: nanoid(), type: type, text: String(text || '').slice(0, 500), author: author,
+      side: side || 'neutral', strength: clampStrength(strength == null ? 3 : strength),
+      fallacy: null, fallacyExplanation: null, highlighted: false, highlightMessage: null,
+      ratingReason: null, x: 1500 + Math.cos(angle) * radius, y: 1000 + Math.sin(angle) * radius,
+      createdAt: Date.now()
+    };
+    state.nodes.push(node);
+    return node;
+  }
+  function createEdge(fromId, toId, type) {
+    var edge = { id: nanoid(), from: fromId, to: toId, type: type };
+    state.edges.push(edge);
+    return edge;
+  }
+  function saveState() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+  }
+  function loadState() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) Object.assign(state, JSON.parse(raw));
+    } catch (e) {}
+  }
+  function serializeNode(n) {
+    return { id: n.id, type: n.type, text: n.text, author: n.author, side: n.side,
+      strength: n.strength, fallacy: n.fallacy || null, highlighted: n.highlighted };
+  }
+
+  // Same 12 tool definitions as index.html, minus DOM rendering.
+  var TOOLS = {
+    get_map_state: {
+      description: 'Returns the current argument map: all nodes, edges, topic and sides.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      execute: function () {
+        return {
+          topic: state.topic, agentSide: state.agentSide, userSide: state.userSide,
+          nodeCount: state.nodes.length, nodes: state.nodes.map(serializeNode),
+          edges: state.edges.map(function (e) { return { id: e.id, from: e.from, to: e.to, type: e.type }; })
+        };
+      }
+    },
+    get_node: {
+      description: "Get full details of a specific node, including what it connects to and from.",
+      inputSchema: { type: 'object', properties: { node_id: { type: 'string' } }, required: ['node_id'] },
+      execute: function (a) {
+        var node = findNode(a.node_id);
+        if (!node) return { error: 'Node ' + a.node_id + ' not found' };
+        var incoming = state.edges.filter(function (e) { return e.to === a.node_id; })
+          .map(function (e) { return Object.assign({}, e, { node: findNode(e.from) }); });
+        var outgoing = state.edges.filter(function (e) { return e.from === a.node_id; })
+          .map(function (e) { return Object.assign({}, e, { node: findNode(e.to) }); });
+        return { node: node, incoming: incoming, outgoing: outgoing };
+      }
+    },
+    get_weak_points: {
+      description: 'Returns nodes that are logically weak (strength <= 2) or contain a flagged fallacy.',
+      inputSchema: { type: 'object', properties: { side: { type: 'string', enum: ['pro', 'con', 'all'] } } },
+      execute: function (a) {
+        var side = (a && a.side) || 'all';
+        var targets = state.nodes.filter(function (n) {
+          return (side === 'all' || n.side === side) && (n.strength <= 2 || n.fallacy);
+        });
+        return { count: targets.length, weakNodes: targets.map(function (n) {
+          return { id: n.id, text: n.text, strength: n.strength, fallacy: n.fallacy || null, type: n.type };
+        }) };
+      }
+    },
+    add_claim: {
+      description: 'Add a new claim (assertion) to the map.',
+      inputSchema: { type: 'object', properties: {
+        text: { type: 'string' }, side: { type: 'string', enum: ['pro', 'con', 'neutral'] },
+        strength: { type: 'number', minimum: 1, maximum: 5 }
+      }, required: ['text', 'side', 'strength'] },
+      execute: function (a) {
+        var node = createNode('claim', a.text, 'agent', a.side, a.strength);
+        saveState();
+        return { id: node.id, message: 'Claim added: "' + node.text + '"' };
+      }
+    },
+    add_support: {
+      description: 'Add supporting evidence for an existing node.',
+      inputSchema: { type: 'object', properties: {
+        text: { type: 'string' }, supports_id: { type: 'string' },
+        side: { type: 'string', enum: ['pro', 'con', 'neutral'] }, strength: { type: 'number', minimum: 1, maximum: 5 }
+      }, required: ['text', 'supports_id', 'side', 'strength'] },
+      execute: function (a) {
+        var target = findNode(a.supports_id);
+        if (!target) return { error: 'Node ' + a.supports_id + ' not found' };
+        var node = createNode('support', a.text, 'agent', a.side, a.strength);
+        createEdge(node.id, a.supports_id, 'supports');
+        saveState();
+        return { id: node.id, message: 'Support added for "' + target.text.slice(0, 40) + '..."' };
+      }
+    },
+    add_objection: {
+      description: 'Challenge an existing node with a counter-argument, optionally naming a fallacy.',
+      inputSchema: { type: 'object', properties: {
+        text: { type: 'string' }, objects_to_id: { type: 'string' },
+        side: { type: 'string', enum: ['pro', 'con', 'neutral'] }, strength: { type: 'number', minimum: 1, maximum: 5 },
+        fallacy: { type: 'string' }
+      }, required: ['text', 'objects_to_id', 'side', 'strength'] },
+      execute: function (a) {
+        var target = findNode(a.objects_to_id);
+        if (!target) return { error: 'Node ' + a.objects_to_id + ' not found' };
+        var node = createNode('objection', a.text, 'agent', a.side, a.strength);
+        if (a.fallacy) { node.fallacy = a.fallacy; target.fallacy = a.fallacy; }
+        createEdge(node.id, a.objects_to_id, 'objects_to');
+        saveState();
+        return { id: node.id, message: 'Objection added' + (a.fallacy ? ' (' + a.fallacy + ')' : '') };
+      }
+    },
+    add_rebuttal: {
+      description: 'Respond to an objection, defending a position.',
+      inputSchema: { type: 'object', properties: {
+        text: { type: 'string' }, rebuts_id: { type: 'string' },
+        side: { type: 'string', enum: ['pro', 'con', 'neutral'] }, strength: { type: 'number', minimum: 1, maximum: 5 }
+      }, required: ['text', 'rebuts_id', 'side', 'strength'] },
+      execute: function (a) {
+        var target = findNode(a.rebuts_id);
+        if (!target) return { error: 'Node ' + a.rebuts_id + ' not found' };
+        var node = createNode('rebuttal', a.text, 'agent', a.side, a.strength);
+        createEdge(node.id, a.rebuts_id, 'rebuts');
+        saveState();
+        return { id: node.id, message: 'Rebuttal added' };
+      }
+    },
+    rate_node: {
+      description: "Update a node's strength rating.",
+      inputSchema: { type: 'object', properties: {
+        node_id: { type: 'string' }, strength: { type: 'number', minimum: 1, maximum: 5 }, reason: { type: 'string' }
+      }, required: ['node_id', 'strength'] },
+      execute: function (a) {
+        var node = findNode(a.node_id);
+        if (!node) return { error: 'Node ' + a.node_id + ' not found' };
+        var old = node.strength;
+        node.strength = clampStrength(a.strength);
+        if (a.reason) node.ratingReason = a.reason;
+        saveState();
+        return { message: 'Strength updated ' + old + ' \u2192 ' + node.strength };
+      }
+    },
+    highlight_node: {
+      description: "Highlight a node (or pass no node_id to clear all highlights).",
+      inputSchema: { type: 'object', properties: { node_id: { type: 'string' }, message: { type: 'string' } } },
+      execute: function (a) {
+        state.nodes.forEach(function (n) { n.highlighted = false; n.highlightMessage = null; });
+        var nodeId = a && a.node_id;
+        if (nodeId) {
+          var node = findNode(nodeId);
+          if (!node) return { error: 'Node ' + nodeId + ' not found' };
+          node.highlighted = true;
+          if (a.message) node.highlightMessage = a.message;
+        }
+        saveState();
+        return { message: nodeId ? 'Node highlighted' : 'Highlights cleared' };
+      }
+    },
+    flag_fallacy: {
+      description: 'Mark a node as containing a named logical fallacy.',
+      inputSchema: { type: 'object', properties: {
+        node_id: { type: 'string' }, fallacy: { type: 'string' }, explanation: { type: 'string' }
+      }, required: ['node_id', 'fallacy'] },
+      execute: function (a) {
+        var node = findNode(a.node_id);
+        if (!node) return { error: 'Node ' + a.node_id + ' not found' };
+        node.fallacy = a.fallacy;
+        if (a.explanation) node.fallacyExplanation = a.explanation;
+        saveState();
+        return { message: 'Fallacy "' + a.fallacy + '" flagged on node "' + node.text.slice(0, 40) + '..."' };
+      }
+    },
+    set_topic: {
+      description: 'Set or update the debate topic and sides.',
+      inputSchema: { type: 'object', properties: {
+        topic: { type: 'string' }, agent_side: { type: 'string', enum: ['pro', 'con'] }
+      }, required: ['topic', 'agent_side'] },
+      execute: function (a) {
+        state.topic = a.topic;
+        state.agentSide = a.agent_side;
+        state.userSide = a.agent_side === 'pro' ? 'con' : 'pro';
+        saveState();
+        return { message: 'Topic set. Agent argues: ' + a.agent_side + '. User argues: ' + state.userSide + '.' };
+      }
+    },
+    clear_map: {
+      description: 'Clear all nodes and edges. Requires confirm: true.',
+      inputSchema: { type: 'object', properties: { confirm: { type: 'boolean' } }, required: ['confirm'] },
+      execute: function (a) {
+        if (!a.confirm) return { error: 'Pass confirm: true to clear the map.' };
+        state.nodes = []; state.edges = []; state.history = [];
+        saveState();
+        return { message: 'Map cleared.' };
+      }
+    }
+  };
+
+  // === UI wiring ===
+  var toolSelect = document.getElementById('tool-select');
+  var toolDesc = document.getElementById('tool-desc');
+  var toolForm = document.getElementById('tool-form');
+  var stateView = document.getElementById('state-view');
+  var log = document.getElementById('log');
+
+  Object.keys(TOOLS).forEach(function (name) {
+    var opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    toolSelect.appendChild(opt);
+  });
+
+  function buildForm() {
+    var tool = TOOLS[toolSelect.value];
+    toolDesc.textContent = tool.description;
+    toolForm.innerHTML = '';
+    var props = tool.inputSchema.properties || {};
+    var required = tool.inputSchema.required || [];
+    Object.keys(props).forEach(function (key) {
+      var spec = props[key];
+      var label = document.createElement('label');
+      label.textContent = key + (required.indexOf(key) >= 0 ? ' *' : '') +
+        (spec.enum ? '' : '');
+      toolForm.appendChild(label);
+
+      var field;
+      if (spec.enum) {
+        field = document.createElement('select');
+        if (required.indexOf(key) < 0) {
+          var blank = document.createElement('option');
+          blank.value = ''; blank.textContent = '(none)';
+          field.appendChild(blank);
+        }
+        spec.enum.forEach(function (v) {
+          var o = document.createElement('option');
+          o.value = v; o.textContent = v;
+          field.appendChild(o);
+        });
+      } else if (spec.type === 'number') {
+        field = document.createElement('input');
+        field.type = 'number';
+        if (spec.minimum != null) field.min = spec.minimum;
+        if (spec.maximum != null) field.max = spec.maximum;
+      } else if (spec.type === 'boolean') {
+        field = document.createElement('select');
+        ['', 'true', 'false'].forEach(function (v) {
+          var o = document.createElement('option');
+          o.value = v; o.textContent = v || '(none)';
+          field.appendChild(o);
+        });
+      } else if (key === 'text' || key === 'explanation' || key === 'message') {
+        field = document.createElement('textarea');
+      } else {
+        field = document.createElement('input');
+        field.type = 'text';
+      }
+      field.dataset.key = key;
+      field.dataset.type = spec.type || (spec.enum ? 'string' : 'string');
+      field.id = 'field-' + key;
+      toolForm.appendChild(field);
+    });
+  }
+
+  function collectArgs() {
+    var tool = TOOLS[toolSelect.value];
+    var props = tool.inputSchema.properties || {};
+    var args = {};
+    Object.keys(props).forEach(function (key) {
+      var el = document.getElementById('field-' + key);
+      if (!el) return;
+      var raw = el.value;
+      if (raw === '') return;
+      if (el.dataset.type === 'number') args[key] = Number(raw);
+      else if (el.dataset.type === 'boolean') args[key] = raw === 'true';
+      else args[key] = raw;
+    });
+    return args;
+  }
+
+  window.runTool = function () {
+    var name = toolSelect.value;
+    var args = collectArgs();
+    var entry = document.createElement('div');
+    entry.className = 'log-entry';
+    try {
+      var result = TOOLS[name].execute(args);
+      var isError = result && result.error;
+      entry.innerHTML = '<div><span class="log-tool">' + name + '</span>' +
+        '<span class="badge">' + (isError ? 'error' : 'ok') + '</span></div>' +
+        '<pre>args: ' + JSON.stringify(args, null, 2) + '\n\nresult: ' + JSON.stringify(result, null, 2) + '</pre>';
+    } catch (e) {
+      entry.innerHTML = '<div><span class="log-tool">' + name + '</span><span class="badge log-error">exception</span></div>' +
+        '<pre class="log-error">' + String(e) + '</pre>';
+    }
+    log.insertBefore(entry, log.firstChild);
+    renderState();
+  };
+
+  function renderState() {
+    stateView.textContent = JSON.stringify(state, null, 2);
+  }
+
+  toolSelect.addEventListener('change', buildForm);
+  loadState();
+  buildForm();
+  renderState();
+})();
+</script>
+</body>
+</html>
