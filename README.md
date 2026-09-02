@@ -1,4 +1,4 @@
-# Argument.ai — Argument Mapping Studio
+# The Argument.ai — Argument Mapping Studio
 
 A WebMCP-powered app where you and an AI agent debate together on a shared visual canvas.
 
