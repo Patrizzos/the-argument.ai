@@ -2,6 +2,8 @@
 
 A WebMCP-powered app where you and an AI agent debate together on a shared visual canvas.
 
+**Live @ https://the-argumentai.vercel.app/**
+
 **Hackathon:** OpenAI WebMCP Challenge — deadline September 3, 2026
 
 ## What it is
